@@ -12,11 +12,11 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE CPP               #-}
+{-# LANGUAGE FlexibleContexts  #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeFamilies      #-}
 {- | Rendering of TensorFlow operations as Haskell functions.
 
 The basic type signature generated for each op is:
@@ -49,57 +49,34 @@ module TensorFlow.OpGen
   , flagParser)
   where
 
-import Data.Foldable (toList)
-import Data.Maybe (fromMaybe)
-import Data.ProtoLens (def, showMessage)
-import Data.List (sortOn)
-import Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NE
-import Lens.Family2 ((^.), (.~), (&), view)
-import Options.Applicative (Parser, help, long, strOption, value)
-import Proto.Tensorflow.Core.Framework.OpDef
-  ( OpList
-  , OpDef
-  )
-import Proto.Tensorflow.Core.Framework.OpDef_Fields
-  ( attr
-  , inputArg
-  , name
-  , op
-  , outputArg
-  )
-import Proto.Tensorflow.Core.Framework.Types (DataType(..))
-import System.FilePath (takeBaseName)
-import TensorFlow.OpGen.ParsedOp
-import Data.Monoid ((<>))
-import Text.PrettyPrint.Mainland
-  ( Doc
-  -- , (<>)
-  , (<+>)
-  , (</>)
-  , (<+/>)
-  , brackets
-  , comma
-  , commasep
-  , dquotes
-  , empty
-  , enclose
-  , flatten
-  , folddoc
-  , hang
-  , indent
-  , parens
-  , sep
-  , stack
-  , strictText
-  , tuple
-  )
-import qualified Data.Set as Set
-import qualified Data.Text as Text
+import           Data.Foldable                                (toList)
+import           Data.List                                    (sortOn)
+import           Data.List.NonEmpty                           (NonEmpty)
+import qualified Data.List.NonEmpty                           as NE
+import           Data.Maybe                                   (fromMaybe)
+import           Data.Monoid                                  ((<>))
+import           Data.ProtoLens                               (def, showMessage)
+import qualified Data.Set                                     as Set
+import qualified Data.Text                                    as Text
+import           Lens.Family2                                 (view, (&), (.~), (^.))
+import           Options.Applicative                          (Parser, help, long,
+                                                               strOption, value)
+import           Proto.Tensorflow.Core.Framework.OpDef        (OpDef, OpList)
+import           Proto.Tensorflow.Core.Framework.OpDef_Fields (attr, inputArg, name, op,
+                                                               outputArg)
+import           Proto.Tensorflow.Core.Framework.Types        (DataType (..))
+import           System.FilePath                              (takeBaseName)
+import           TensorFlow.OpGen.ParsedOp
+import           Text.PrettyPrint.Mainland                    (Doc, brackets, comma,
+                                                               commasep, dquotes, empty,
+                                                               enclose, flatten, folddoc,
+                                                               hang, indent, parens, sep,
+                                                               stack, strictText, tuple,
+                                                               (<+/>), (<+>), (</>))
 
 data OpGenFlags = OpGenFlags
-     { outputFile :: String
-     , prefix :: String
+     { outputFile  :: String
+     , prefix      :: String
      , excludeList :: String
      }
 
@@ -313,7 +290,7 @@ typeSig pre pOp = constraints
     signatureFold = folddoc (\x y -> x </> "->" <+> y)
     attrInput a = renderAttrType (attrInfo a) <+> hang 0 ("-- ^" <+> attrComment a)
     renderAttrType (AttrSingle a) = renderAttrBaseType a
-    renderAttrType (AttrList a) = brackets $ renderAttrBaseType a
+    renderAttrType (AttrList a)   = brackets $ renderAttrBaseType a
     renderAttrBaseType = \case
         AttrBytes -> "ByteString"
         AttrInt64 -> "Data.Int.Int64"
@@ -325,10 +302,10 @@ typeSig pre pOp = constraints
 
     tensorArgAndComment t = tensorArg t <+> hang 0 ("-- ^" <+> argComment t)
     outputs = case parsedOutputs pOp of
-        [] -> wrapOutput "ControlNode"
+        []  -> wrapOutput "ControlNode"
         -- TODO(judahjacobson): To improve indentation: `tensorArgAndComment a`
         [a] -> wrapOutput (tensorArg a) <+> "-- ^" <+> argComment a
-        as -> wrapOutput (tuple (map tensorArg as)) <+/> resultComment as
+        as  -> wrapOutput (tuple (map tensorArg as)) <+/> resultComment as
     wrapOutput o
         | parsedOpIsMonadic pOp = "m'" <+> parens o
         | otherwise = o
@@ -343,14 +320,14 @@ tensorArg p = case parsedArgCase p of
         -> "TensorList" <+> parens (kind k) <+> renderHaskellName t
   where
     kind k = case k of
-                ArgTensorRef -> "Ref"
-                ArgTensorValue -> "Value"
-                ArgTensorBuild -> "Build"
+                ArgTensorRef    -> "Ref"
+                ArgTensorValue  -> "Value"
+                ArgTensorBuild  -> "Build"
                 ArgSomeTensor v -> strictText v
     tensorType t k = let
         a = case t of
                 ArgTypeFixed dt -> strictText $ dtTypeToHaskell dt
-                ArgTypeAttr n -> renderHaskellName n
+                ArgTypeAttr n   -> renderHaskellName n
         in "Tensor" <+> kind k <+> a
 
 attrComment :: Attr a -> Doc
@@ -387,10 +364,10 @@ resultComment os = stack $ flatten commentSummary : map commentDetails os
 -- or "TensorTypes ts" or "OneOfs [..] ts".
 tensorArgConstraint :: Attr TypeParam -> Doc
 tensorArgConstraint a = case attrInfo a of
-    TypeParam False Nothing -> "TensorType" <+> n
+    TypeParam False Nothing   -> "TensorType" <+> n
     TypeParam False (Just as) -> "OneOf" <+> typeList as <+> n
-    TypeParam True Nothing -> "TensorTypes" <+> n
-    TypeParam True (Just as) -> "OneOfs" <+> typeList as <+> n
+    TypeParam True Nothing    -> "TensorTypes" <+> n
+    TypeParam True (Just as)  -> "OneOfs" <+> typeList as <+> n
   where
     n = renderHaskellAttrName a
     -- Produces a type-level list, e.g.: '[Int32,Int64,Float]
