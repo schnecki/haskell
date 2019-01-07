@@ -91,6 +91,17 @@ fudgePackageDesc lbi p = p
 blackList =
     [ -- Requires the "func" type:
       "FilterDataset"
+    , "BatchFunction"
+    , "ExperimentalFunctionBufferingResource"
+    , "MapDefun"
+    , "ParallelInterleaveDatasetV2"
+    , "ReduceDataset"
+    , "StatelessIf"
+    , "StatelessWhile"
+    , "XlaReduce"
+    , "XlaSelectAndScatter"
+    , "_XlaCompile"
+    , "StatefulPartitionedCall"
     , "FlatMapDataset"
     , "For"
     , "GeneratorDataset"
