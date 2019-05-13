@@ -54,8 +54,9 @@ import           Data.List                                    (sortOn)
 import           Data.List.NonEmpty                           (NonEmpty)
 import qualified Data.List.NonEmpty                           as NE
 import           Data.Maybe                                   (fromMaybe)
-import           Data.Monoid                                  ((<>))
-import           Data.ProtoLens                               (def, showMessage)
+import           Data.ProtoLens                               (showMessage)
+import           Data.ProtoLens.Default                       (def)
+import           Data.Semigroup                               ((<>))
 import qualified Data.Set                                     as Set
 import qualified Data.Text                                    as Text
 import           Lens.Family2                                 (view, (&), (.~), (^.))

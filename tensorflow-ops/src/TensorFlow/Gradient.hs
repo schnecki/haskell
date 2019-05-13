@@ -31,11 +31,12 @@ import Control.Monad (forM, zipWithM)
 import Control.Monad.State.Strict (State, evalState, gets, modify)
 import Data.ByteString (ByteString)
 import Data.Complex (Complex)
-import Data.Default (def)
+import Data.ProtoLens.Default(def)
 import Data.Int (Int32, Int64)
 import Data.Foldable (foldlM)
 import Data.List (foldl', sortBy)
 import Data.Map.Strict (Map)
+import qualified Data.IntSet as IntSet
 import Data.Maybe (fromMaybe, maybeToList, mapMaybe)
 import Data.Ord (comparing)
 import Data.ProtoLens.TextFormat (showMessage)
@@ -165,6 +166,11 @@ gradients y xs = build $ do
         (\f x -> fromMaybe (error $ "no NodeDef found for " ++ show x) (f x))
         . flip Map.lookup
     let (gr, nodeMap) = createGraph yName nodeDefLookup
+        xnodes = mapMaybe (\x -> nodeMap ^. (at . outputNodeName . renderedOutput $ x)) xs
+        -- make a set of the nodes reachable from the xnodes
+        -- The xnodes are not part of this set (unless reachable from another xnode)
+        reachableSet = computeReachableSet xnodes gr
+
     -- Set gradient of y to one.
     -- TODO: nicer
     let initPending :: Map.Map FGL.Node (PendingGradients a)
@@ -175,13 +181,20 @@ gradients y xs = build $ do
                                 .~ [yOne]
                                 )
     -- Calculate the gradients of y w.r.t. each node in the graph.
-    gradientMap <- graphGrads gr initPending
+    gradientMap <- graphGrads gr reachableSet initPending
     -- Lookup the gradients for each x.
     forM xs $ \x ->
         let Output i xName = renderedOutput x
         in maybe (render $ zerosLike $ toTensor x) return $ do
             n <- nodeMap ^. at xName
             gradientMap ^. at n . nonEmpty . outputIxAt i
+
+-- | Compute a set of nodes reachable from the start nodes
+--
+-- the start nodes are excluded, unless reachable from another start node
+computeReachableSet :: [FGL.Node] -> Graph -> IntSet.IntSet
+computeReachableSet vs g =
+  IntSet.fromList $ concatMap (drop 1 . FGL.preorder) (FGL.dff vs g)
 
 outputIxAt :: OutputIx -> Lens' (IntMap.IntMap v) (Maybe v)
 outputIxAt = intAt . unOutputIx
@@ -245,16 +258,15 @@ nonEmpty = anon mempty null
 -- | Calculate the gradients for every node in a graph.
 graphGrads :: forall a. GradientCompatible a
            => Graph
+           -> IntSet.IntSet
            -> Map FGL.Node (PendingGradients a)
            -- ^ Initial gradients (usually just 1 for the node of interest).
            -> Build (Map FGL.Node (Gradients a))
-graphGrads gr initPending = view gradientsResult <$> foldlM go initState nodeOrder
+graphGrads gr reachableSet initPending = view gradientsResult <$> foldlM go initState nodeOrder
   where
     initState = GradientsState initPending Map.empty
     -- Reverse topological sort.
-    -- TODO(fmayle): Filter out nodes that are not successors of any x in xs to
-    -- avoid calculating gradients that won't be used.
-    nodeOrder = FGL.topsort $ FGL.grev gr
+    nodeOrder = FGL.topsort . FGL.grev $ gr
     go :: GradientsState a -> Int -> Build (GradientsState a)
     go state node = do
         -- Aggregate the accumulated gradients for this node.
@@ -263,11 +275,17 @@ graphGrads gr initPending = view gradientsResult <$> foldlM go initState nodeOrd
         if null outputGrads
            then pure state
            else do
-              let ctx = FGL.context gr node
-              inputGrads <- calculateInputGrads ctx outputGrads gr
-              -- Calculate the gradients for each of the node's inputs.
               let nextState = state & gradientsResult %~ Map.insert node outputGrads
-              pure $ updatePendingGradients ctx inputGrads nextState
+              -- Only consider nodes that are reachable from the inputs to
+              -- avoid calculating gradients that won't be used.
+              if node `IntSet.member` reachableSet
+                then do
+                  let ctx = FGL.context gr node
+                  inputGrads <- calculateInputGrads ctx outputGrads gr
+                  -- Calculate the gradients for each of the node's inputs.
+                  pure $ updatePendingGradients ctx inputGrads nextState
+                else
+                  pure nextState
 
 -- | Reduce accumulated gradients for each output to one Tensor.
 sumPendingGradient :: GradientCompatible a
@@ -556,7 +574,7 @@ opGrad "Sum" _ [toT -> x, toT -> indices] [dz] =
     grad = reshape dz outputShapeKeptDims
 
 opGrad "Mean" u v@[toT -> x, _] w =
-    [Just $ dz `CoreOps.div` CoreOps.cast factor, Nothing]
+    [Just $ dz `CoreOps.div` (CoreOps.stopGradient $ CoreOps.cast $ factor), Nothing]
   where
     [Just dz, Nothing] = opGrad "Sum" u v w
     inputShape = shape (x :: Tensor Build a)
@@ -676,6 +694,41 @@ opGrad "Conv2DBackpropInput" nodeDef [_, toT -> x, toT -> y] [dz] =
     useCudnnOnGpu = lookupAttr nodeDef "use_cudnn_on_gpu" :: Bool
     dataFormat = lookupAttr nodeDef "data_format" :: ByteString
 
+opGrad "DepthwiseConv2dNative" nodeDef [toT -> x, toT -> y] [dz] =
+    [ Just $ CoreOps.depthwiseConv2dNativeBackpropInput'
+                ((opAttr "strides" .~ strides)
+                    . (opAttr "padding" .~ padding)
+                    . (opAttr "data_format" .~ dataFormat))
+                (shape x) y dz
+    , Just $ CoreOps.depthwiseConv2dNativeBackpropFilter'
+                ((opAttr "strides" .~ strides)
+                    . (opAttr "padding" .~ padding)
+                    . (opAttr "data_format" .~ dataFormat))
+                x (shape y) dz
+    ]
+  where
+    strides = lookupAttr nodeDef "strides" :: [Int64]
+    padding = lookupAttr nodeDef "padding" :: ByteString
+    dataFormat = lookupAttr nodeDef "data_format" :: ByteString
+
+opGrad "DepthwiseConv2dNativeBackpropInput" nodeDef [_, toT -> x, toT -> y] [dz] =
+    [ Nothing
+    , Just $ CoreOps.depthwiseConv2dNativeBackpropFilter'
+                ((opAttr "strides" .~ strides)
+                    . (opAttr "padding" .~ padding)
+                    . (opAttr "data_format" .~ dataFormat))
+                dz (shape x) y
+    , Just $ CoreOps.depthwiseConv2dNative'
+                ((opAttr "strides" .~ strides)
+                    . (opAttr "padding" .~ padding)
+                    . (opAttr "data_format" .~ dataFormat))
+                dz x
+    ]
+  where
+    strides = lookupAttr nodeDef "strides" :: [Int64]
+    padding = lookupAttr nodeDef "padding" :: ByteString
+    dataFormat = lookupAttr nodeDef "data_format" :: ByteString
+
 opGrad "MaxPool" nodeDef [toT -> x] [dz] =
     [ Just $ CoreOps.maxPoolGrad'
                 ((opAttr "ksize" .~ ksize)
@@ -709,6 +762,27 @@ opGrad "Pad" _ [toT -> x, toT -> padPattern] [dz] =
     -- The slice of the pad pattern has the same rank as the pad pattern itself
     gradientSliceBegin = CoreOps.reshape padPatternSliced rankx
     gradientSliceSize = shape (x :: Tensor Build Float)
+
+-- Gradient for Slice
+-- Create an Nx2 padding where N is the rank of (grad of) Slice and the first
+-- column represents how many zeros are to be prepended for each dimension, and the second
+-- column indicates how many zeros are appended.
+-- The number of zeros to prepend is the shape of the beginvec.
+-- The number of zeros to append is the shape of the inputvec
+-- elementwise-subtracted by both the beginvec and sizevec.
+-- Some more reshaping is needed to assemble this tensor with the
+-- right dimensions.
+opGrad "Slice" _ [toT -> inputvec, toT -> beginvec, _] [dz] =
+   [Just $ CoreOps.pad dz paddings, Nothing, Nothing]
+  where
+    v1 = vector [1 :: Int32]
+    inputRank' = CoreOps.rank (inputvec :: Tensor Build Float)
+    -- For some reason inputRank' has an empty shape
+    inputRank = CoreOps.reshape inputRank' v1
+    padShape = CoreOps.concat 0 [inputRank, v1]
+    beforePad = CoreOps.reshape beginvec padShape
+    afterPad = CoreOps.reshape (shape inputvec - shape dz - beginvec) padShape
+    paddings = CoreOps.concat 1 [beforePad, afterPad]
 
 -- TODO: This could be either Int32 or Int64.
 opGrad "BatchToSpaceND" _ [_, toT @Int32 -> blockShape, toT @Int32 -> crops] [dz] =
@@ -796,6 +870,17 @@ opGrad "Tile" _ [toT -> x, toT -> multiples] [dz] =
     axes = CoreOps.range 0 (CoreOps.size splitShape) (2 :: Tensor Build Int32)
     reshapedDz = CoreOps.reshape dz splitShape
 
+opGrad "ResizeBilinear" nodeDef [toT -> x, _] [dz] =
+    [ Just $ CoreOps.resizeBilinearGrad'
+               (opAttr "align_corners" .~ align)
+               (CoreOps.cast dz)
+               x
+
+    , Nothing
+    ]
+  where
+    align = lookupAttr nodeDef "align_corners" :: Bool
+
 opGrad "ZerosLike" _ _ _ = [Nothing]
 opGrad "Fill" _ _ [dz] = [Nothing, Just $ sum dz rx]
   where
@@ -807,11 +892,13 @@ opGrad "Fill" _ _ [dz] = [Nothing, Just $ sum dz rx]
 -- through each read.
 opGrad "ReadVariableOp" _ _ [dz] = [Just $ expr dz]
 
--- TODO(fmayle): These can go away if we properly prune the graph.
 opGrad "Const" _ _ _ = [Nothing, Nothing]
-opGrad "Placeholder" _ _ _ = []
+opGrad "StopGradient" _ _ _ = [Nothing]
 opGrad "VarHandleOp" _ _ _ = []
-opGrad "Variable" _ _ _ = []
+
+opGrad "Sqrt" _ [toT -> x] [dz] = [Just $ sq' `CoreOps.mul` dz]
+  where
+    sq' = scalar 1 `CoreOps.div` (scalar 2 `CoreOps.mul` CoreOps.sqrt x)
 
 opGrad n nodeDef ins grads =
     error $ "no gradient implemented for " ++
@@ -830,6 +917,8 @@ numOutputs o =
         "Concat" -> 1
         "Conv2D" -> 1
         "Conv2DBackpropInput" -> 1
+        "DepthwiseConv2dNative" -> 1
+        "DepthwiseConv2dNativeBackpropInput" -> 1
         "Div" -> 1
         "DynamicStitch" -> 1
         "DynamicPartition" ->
@@ -850,6 +939,7 @@ numOutputs o =
         "Neg" -> 1
         "Pad" -> 1
         "Placeholder" -> 1
+        "StopGradient" -> 1
         "OneHot" -> 1
         "ReadVariableOp" -> 1
         "RefIdentity" -> 1
@@ -858,15 +948,18 @@ numOutputs o =
         "Reshape" -> 1
         "Select" -> 1
         "Size" -> 1
+        "Slice" -> 1
         "SoftmaxCrossEntropyWithLogits" -> 2
         "SpaceToBatchND" -> 1
         "SparseSegmentSum" -> 1
         "Square" -> 1
         "Squeeze" -> 1
+        "Sqrt" -> 1
         "Sub" -> 1
         "Sum" -> 1
         "Tanh" -> 1
         "Tile" -> 1
+        "ResizeBilinear" -> 1
         "Transpose" -> 1
         "TruncatedNormal" -> 1
         "VarHandleOp" -> 1

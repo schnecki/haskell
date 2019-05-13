@@ -16,6 +16,7 @@
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE NoMonadFailDesugaring #-}
 
 import Data.Int (Int32, Int64)
 import Data.List (sort)
@@ -32,9 +33,9 @@ import Control.Monad(forM_, replicateM, zipWithM)
 import Control.Monad.IO.Class (liftIO)
 
 import qualified TensorFlow.Core as TF
-import qualified TensorFlow.GenOps.Core as TF (conv2DBackpropInput', max, maximum, tile, pad, batchToSpaceND, spaceToBatchND, squeeze)
+import qualified TensorFlow.GenOps.Core as TF (conv2DBackpropInput', max, maximum, resizeBilinear', tile, pad, batchToSpaceND, spaceToBatchND, squeeze, sqrt, slice, shape, diag, depthwiseConv2dNative', depthwiseConv2dNativeBackpropInput')
 import qualified TensorFlow.Gradient as TF
-import qualified TensorFlow.Ops as TF hiding (zeroInitializedVariable)
+import qualified TensorFlow.Ops as TF hiding (zeroInitializedVariable, shape)
 import qualified TensorFlow.Output as TF
 import qualified TensorFlow.Types as TF
 import qualified TensorFlow.Variable as TF
@@ -123,6 +124,65 @@ testGradientDisconnected = testCase "testGradientDisconnected" $ do
                    ]
     sort expected @=? sort ops
 
+testGradientIncidental :: Test
+testGradientIncidental = testCase "testGradientIncidental" $ do
+    let grads = do
+            x <- TF.render $ TF.scalar (3 :: Float)
+            b <- TF.render $ TF.scalar (4 :: Float)
+            w <- TF.render $ TF.diag $ TF.vector [ 1.0 :: Float ]
+            let incidental = b `TF.mul` w
+            let y = (x `TF.mul` b) `TF.add` incidental
+            TF.gradients y [x]
+
+    -- Assert that the gradients are right.
+    [dx] <- TF.runSession $ grads >>= TF.run
+    4 @=? TF.unScalar dx
+    -- Assert that the graph has the expected ops.
+    let graphDef = TF.asGraphDef grads
+    putStrLn $ showMessage graphDef
+    let ops = graphDef ^.. node . traverse . op
+        expected = [ "Add"
+                   , "BroadcastGradientArgs"
+                   , "BroadcastGradientArgs"
+                   , "Const"
+                   , "Const"
+                   , "Const"
+                   , "Const"
+                   , "Diag"
+                   , "Fill"
+                   , "Mul"
+                   , "Mul"
+                   , "Mul"
+                   , "Mul"
+                   , "Reshape"
+                   , "Reshape"
+                   , "Reshape"
+                   , "Reshape"
+                   , "Shape"
+                   , "Shape"
+                   , "Shape"
+                   , "Shape"
+                   , "Shape"
+                   , "Sum"
+                   , "Sum"
+                   , "Sum"
+                   , "Sum"
+                   ]
+    sort expected @=? sort ops
+
+testGradientPruning :: Test
+testGradientPruning = testCase "testGradientPruning" $ do
+    let grads = do
+            x <- TF.render $ TF.scalar (3 :: Float)
+            b <- TF.render $ TF.scalar (4 :: Float)
+            bx <- TF.render $ b `TF.mul` x
+            let y = bx `TF.add` b
+            TF.gradients y [x, bx]
+
+    -- Assert that the gradients are right.
+    [dx, dxb] <- TF.runSession $ grads >>= TF.run
+    4 @=? TF.unScalar dx
+    1 @=? TF.unScalar dxb
 
 -- Test that identical "stateful" ops work with createGraph.
 testCreateGraphStateful :: Test
@@ -170,6 +230,23 @@ testAddNGradient = testCase "testAddNGradient" $ do
         TF.gradients y [x] >>= TF.run
     V.fromList [2, 2, 2 :: Float] @=? dx
 
+testMeanGradient :: Test
+testMeanGradient = testCase "testMeanGradient" $ do
+    [dx] <- TF.runSession $ do
+        x <- TF.render $ TF.vector [1, 2, 0 :: Float]
+        let y = TF.mean x (TF.vector [0 :: Int32])
+        TF.gradients y [x] >>= TF.run
+    V.fromList [1, 1, 1 :: Float] @=? dx
+
+testMeanGradGrad :: Test
+testMeanGradGrad = testCase "testMeanGradGrad" $ do
+    [ddx] <- TF.runSession $ do
+        x <- TF.render $ TF.vector [1, 2, 0 :: Float]
+        let y = TF.mean x (TF.vector [0 :: Int32])
+        [dx] <- TF.gradients y [x]
+        TF.gradients dx [x] >>= TF.run
+
+    V.fromList [0, 0, 0 :: Float] @=? ddx
 
 testMaxGradient :: Test
 testMaxGradient = testCase "testMaxGradient" $ do
@@ -324,6 +401,34 @@ testPad =
     V.fromList [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1] @=? dx
     V.fromList [2, 2, 3] @=? s
 
+
+testSqrt :: Test
+testSqrt = testCase "testSqrt" $ do
+    [dx] <- TF.runSession $ do
+        x <- TF.render $ TF.vector [0.0625 :: Float]
+        let y = TF.sqrt x
+        TF.gradients y [x] >>= TF.run
+    V.fromList [2] @=? dx
+
+testSlice :: Test
+testSlice =
+  testCase "testSlice" $ do
+    ([dx], [s]) <-
+      TF.runSession $ do
+        (x :: TF.Tensor TF.Value Float) <- TF.render $ TF.zeros $ TF.Shape [2, 3, 4 :: Int64]
+        (z :: TF.Tensor TF.Value Float) <- TF.render $ TF.zeros $ TF.Shape [1, 2, 2 :: Int64]
+        let y = TF.slice x (TF.constant (TF.Shape [3]) [1, 1, 1 :: Int32]) (TF.shape z)
+        calculateGradWithShape y x
+    let expected =
+         [0, 0, 0, 0,
+          0, 0, 0, 0,
+          0, 0, 0, 0,
+          0, 0, 0, 0,
+          0, 1, 1, 0,
+          0, 1, 1, 0]
+    V.fromList expected @=? dx
+    V.fromList [2, 3, 4] @=? s
+
 testBatchToSpaceND :: Test
 testBatchToSpaceND =
   testCase "testBatchToSpaceND" $ do
@@ -401,6 +506,22 @@ testTile2DGrad = testCase "testTileGrad2D" $ do
     shapeX @=? (shapeDX :: V.Vector Int32)
     V.fromList [6, 6, 6, 6, 6, 6::Float] @=? (dx :: V.Vector Float)
 
+testResizeBilinearGrad :: Test
+testResizeBilinearGrad = testCase "testResizeBilinearGrad" $ do
+    (dx, shapeDX, shapeX) <- TF.runSession $ do
+        let shape = TF.vector [1, 2, 2, 1 :: Int32]
+        x <- TF.render $ TF.fill shape (TF.scalar (1 :: Float))
+        let outSize = TF.vector [4, 4 :: Int32]
+            align = TF.opAttr "align_corners" .~ True
+            y = TF.resizeBilinear' align x outSize
+
+        [dx] <- TF.gradients y [x]
+        TF.run (dx, TF.shape dx, TF.shape x)
+    shapeX @=? (shapeDX :: V.Vector Int32)
+    let expect = V.fromList [4, 4, 4, 4 :: Float]
+        near = 0.00001 > (V.sum $ V.zipWith (-) expect (dx :: V.Vector Float))
+    near @=? True
+
 matMulGradient :: Test
 matMulGradient = testCase "matMulGradients" $ do
 
@@ -475,6 +596,7 @@ transAttrs :: (TF.Attribute a,
 transAttrs a b =
   (TF.opAttr "transpose_a" .~ a) . (TF.opAttr "transpose_b" .~ b)
 
+-- TODO check gradient with regard to filter also
 testConv2DBackpropInputGrad :: Test
 testConv2DBackpropInputGrad = testCase "testConv2DBackpropInputGrad" $ do
     (dx, shapeDX, shapeX) <- TF.runSession $ do
@@ -496,15 +618,60 @@ testConv2DBackpropInputGrad = testCase "testConv2DBackpropInputGrad" $ do
     shapeX @=? (shapeDX :: V.Vector Int32)
     V.fromList [4::Float] @=? (dx :: V.Vector Float)
 
+testDepthwiseConv2dGrad :: Test
+testDepthwiseConv2dGrad = testCase "testDepthwiseConv2dGrad" $ do
+    (dx, shapeDX, shapeX) <- TF.runSession $ do
+        let conv_input_shape = TF.vector [1, 2, 2, 1 :: Int32]
+        x <- TF.render $ TF.fill conv_input_shape (TF.scalar (2 :: Float))
+
+        let filterShape = TF.vector [2, 2, 1, 1 :: Int32]
+        filter' <- TF.render $ TF.fill filterShape (TF.scalar (1 :: Float))
+        let y = TF.depthwiseConv2dNative'
+                ( (TF.opAttr "strides" .~ [1 :: Int64, 1, 1, 1])
+                . (TF.opAttr "padding" .~ (BS.pack "VALID"))
+                . (TF.opAttr "data_format" .~ (BS.pack "NHWC"))
+                )
+                x filter'
+
+        [dx] <- TF.gradients y [x]
+        TF.run (dx, TF.shape dx, TF.shape x)
+    shapeX @=? (shapeDX :: V.Vector Int32)
+    V.fromList [1, 1, 1, 1 :: Float] @=? (dx :: V.Vector Float)
+
+-- TODO also test filter gradient
+testDepthwiseConv2dBackpropInputGrad :: Test
+testDepthwiseConv2dBackpropInputGrad = testCase "testDepthwiseConv2dBackpropInputGrad" $ do
+    (dx, shapeDX, shapeX) <- TF.runSession $ do
+        let conv_input_shape = TF.vector [1, 2, 2, 1 :: Int32]
+        let conv_out_shape = TF.vector [1, 1, 1, 1 :: Int32]  -- [batch, h, w, out_channels]
+        x <- TF.render $ TF.fill conv_out_shape (TF.scalar (1::Float))
+
+        let filterShape = TF.vector [2, 2, 1, 1 :: Int32]
+        filter' <- TF.render $ TF.fill filterShape (TF.scalar (1 :: Float))
+        let y = TF.depthwiseConv2dNativeBackpropInput'
+                ( (TF.opAttr "strides" .~ [1 :: Int64, 1, 1, 1])
+                . (TF.opAttr "padding" .~ (BS.pack "VALID"))
+                . (TF.opAttr "data_format" .~ (BS.pack "NHWC"))
+                )
+                conv_input_shape filter' x
+
+        [dx] <- TF.gradients y [x]
+        TF.run (dx, TF.shape dx, TF.shape x)
+    shapeX @=? (shapeDX :: V.Vector Int32)
+    V.fromList [4::Float] @=? (dx :: V.Vector Float)
 
 main :: IO ()
 main = defaultMain
             [ testGradientSimple
             , testGradientDisconnected
+            , testGradientIncidental
+            , testGradientPruning
             , testCreateGraphStateful
             , testCreateGraphNameScopes
             , testDiamond
             , testAddNGradient
+            , testMeanGradient
+            , testMeanGradGrad
             , testMaxGradient
             , testConcatGradient
             , testConcatGradientSimple
@@ -517,12 +684,15 @@ main = defaultMain
             , testExpandDims
             , testReshape
             , testPad
+            , testSqrt
+            , testSlice
             , testBatchToSpaceND
             , testSpaceToBatchND
             , testSqueeze
             , testFillGrad
             , testTileGrad
             , testTile2DGrad
+            , testResizeBilinearGrad
             , matMulGradient
             , matMulGradGrad
             , matMulTransposeGradient (False, False)
@@ -530,4 +700,6 @@ main = defaultMain
             , matMulTransposeGradient (True, False)
             , matMulTransposeGradient (True, True)
             , testConv2DBackpropInputGrad
+            , testDepthwiseConv2dGrad
+            , testDepthwiseConv2dBackpropInputGrad
             ]

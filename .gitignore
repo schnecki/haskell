@@ -1,4 +1,5 @@
 **/.stack-work
 .stack/
 tensorflow-mnist-input-data/data/*.gz
-/tensorflow-opgen/TAGS
+*TAGS
+.DS_Store
