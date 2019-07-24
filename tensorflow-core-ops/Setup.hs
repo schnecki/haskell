@@ -16,28 +16,22 @@
 -- | Generates the wrappers for Ops shipped with tensorflow.
 module Main where
 
-import Distribution.PackageDescription
-    ( PackageDescription(..)
-    , libBuildInfo
-    , hsSourceDirs
-    )
-import qualified Distribution.Simple.BuildPaths as BuildPaths
-import Distribution.Simple.LocalBuildInfo (LocalBuildInfo)
-import Distribution.Simple
-    ( defaultMainWithHooks
-    , simpleUserHooks
-    , UserHooks(..)
-    )
-import Data.List (intercalate)
-import Data.ProtoLens (decodeMessage)
-import System.Directory (createDirectoryIfMissing)
-import System.Exit (exitFailure)
-import System.FilePath ((</>))
-import System.IO (hPutStrLn, stderr)
-import TensorFlow.Internal.FFI (getAllOpList)
-import TensorFlow.OpGen (docOpList, OpGenFlags(..))
-import Text.PrettyPrint.Mainland (prettyLazyText)
-import qualified Data.Text.Lazy.IO as Text
+import           Data.List                          (intercalate)
+import           Data.ProtoLens                     (decodeMessage)
+import qualified Data.Text.Lazy.IO                  as Text
+import           Distribution.PackageDescription    (PackageDescription (..), hsSourceDirs,
+                                                     libBuildInfo)
+import           Distribution.Simple                (UserHooks (..), defaultMainWithHooks,
+                                                     simpleUserHooks)
+import qualified Distribution.Simple.BuildPaths     as BuildPaths
+import           Distribution.Simple.LocalBuildInfo (LocalBuildInfo)
+import           System.Directory                   (createDirectoryIfMissing)
+import           System.Exit                        (exitFailure)
+import           System.FilePath                    ((</>))
+import           System.IO                          (hPutStrLn, stderr)
+import           TensorFlow.Internal.FFI            (getAllOpList)
+import           TensorFlow.OpGen                   (OpGenFlags (..), docOpList)
+import           Text.PrettyPrint.Mainland          (prettyLazyText)
 
 main = defaultMainWithHooks generatingOpsWrappers
 
@@ -92,16 +86,17 @@ blackList =
     [ -- Requires the "func" type:
       "FilterDataset"
     , "BatchFunction"
-    , "ExperimentalFunctionBufferingResource"
-    , "MapDefun"
-    , "ParallelInterleaveDatasetV2"
-    , "ReduceDataset"
-    , "StatelessIf"
-    , "StatelessWhile"
-    , "XlaReduce"
-    , "XlaSelectAndScatter"
-    , "_XlaCompile"
-    , "StatefulPartitionedCall"
+    , "Case"
+    , "ChooseFastestBranchDataset"
+    , "ExperimentalGroupByReducerDataset"
+    , "ExperimentalGroupByWindowDataset"
+    , "ExperimentalMapAndBatchDataset"
+    , "ExperimentalMapDataset"
+    , "ExperimentalNumaMapAndBatchDataset"
+    , "ExperimentalParallelInterleaveDataset"
+    , "ExperimentalScanDataset"
+    , "ExperimentalTakeWhileDataset"
+    , "FilterDataset"
     , "FlatMapDataset"
     , "For"
     , "GeneratorDataset"
@@ -112,22 +107,33 @@ blackList =
     , "MapAndBatchDataset"
     , "MapAndBatchDatasetV2"
     , "MapDataset"
-    , "MapDataset"
+    , "MapDefun"
     , "OneShotIterator"
     , "ParallelInterleaveDataset"
+    , "ParallelInterleaveDatasetV2"
     , "ParallelMapDataset"
+    , "ParseSequenceExample"
     , "PartitionedCall"
+    , "ReduceDataset"
     , "RemoteCall"
     , "ScanDataset"
+    , "StatefulPartitionedCall"
+    , "StatelessIf"
+    , "StatelessWhile"
     , "SymbolicGradient"
+    , "TPUPartitionedCall"
     , "TPUReplicate"
     , "While"
     , "XlaIf"
     , "XlaLaunch"
+    , "XlaReduce"
     , "XlaReduceWindow"
+    , "XlaSelectAndScatter"
     , "XlaWhile"
     , "_If"
+    , "_TPUReplicate"
     , "_While"
+    , "_XlaCompile"
     ]
 
 autogenModulesDir :: LocalBuildInfo -> FilePath

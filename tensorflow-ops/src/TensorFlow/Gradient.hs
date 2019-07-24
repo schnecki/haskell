@@ -85,6 +85,8 @@ import TensorFlow.Ops
     , shape
     , softmaxCrossEntropyWithLogits
     , sum
+    , sigmoid
+    , sigmoidGrad
     , scalarize
     , vector
     , zerosLike
@@ -481,6 +483,7 @@ opGrad "Neg" _ [_] [dz] = [Just $ negate $ expr dz]
 opGrad "Relu" _ [toT -> x] [dz] = [Just $ reluGrad dz x]
 opGrad "ReluGrad" _ [_, toT -> x ] [dz] = [Just $ reluGrad dz x, Just $ CoreOps.zerosLike x]
 opGrad "Tanh" _ [toT -> x] [dz] = [Just $ tanhGrad (tanh x) dz]
+opGrad "Sigmoid" _ [toT -> x] [dz] = [Just $ sigmoidGrad (sigmoid x) dz]
 
 opGrad "Concat" _ _ix [dy]
     -- Concat concatenates input tensors
@@ -646,6 +649,25 @@ opGrad "MatMul" nodeDef [toT -> x, toT -> y] [dz] =
        (True, True) ->
            [ Just $ matMul' (transAttrs True True) y dz
            , Just $ matMul' (transAttrs True True) dz x]
+
+opGrad "BatchMatMul" nodeDef [toT -> x, toT -> y] [dz] =
+    let adjX = lookupAttr nodeDef "adj_x"
+        adjY = lookupAttr nodeDef "adj_y"
+        adjAttrs a b =
+            (opAttr "adj_x" .~ a) . (opAttr "adj_y" .~ b)
+    in case (adjX, adjY) of
+        (False, False) ->
+            [ Just $ CoreOps.batchMatMul' (adjAttrs False True) dz y
+            , Just $ CoreOps.batchMatMul' (adjAttrs True False) x dz]
+        (False, True) ->
+            [ Just $ CoreOps.batchMatMul dz y
+            , Just $ CoreOps.batchMatMul' (adjAttrs True False) dz x]
+        (True, False) ->
+            [ Just $ CoreOps.batchMatMul' (adjAttrs False True) y dz
+            , Just $ CoreOps.batchMatMul x dz]
+        (True, True) ->
+            [ Just $ CoreOps.batchMatMul' (adjAttrs True True) y dz
+            , Just $ CoreOps.batchMatMul' (adjAttrs True True) dz x]
 
 opGrad "Transpose" _ [_, toT -> p] [dz] =
     [ Just $ CoreOps.transpose dz
@@ -912,6 +934,7 @@ numOutputs o =
         "Add" -> 1
         "AddN" -> 1
         "BatchToSpaceND" -> 1
+        "BatchMatMul" -> 1
         "Cast" -> 1
         "Const" -> 1
         "Concat" -> 1
@@ -947,6 +970,7 @@ numOutputs o =
         "ReluGrad" -> 1
         "Reshape" -> 1
         "Select" -> 1
+        "Sigmoid" -> 1
         "Size" -> 1
         "Slice" -> 1
         "SoftmaxCrossEntropyWithLogits" -> 2
