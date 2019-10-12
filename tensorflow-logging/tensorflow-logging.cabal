@@ -1,5 +1,5 @@
 name:                tensorflow-logging
-version:             0.2.0.0
+version:             0.2.0.1
 synopsis:            TensorBoard related functionality.
 description:         Please see README.md
 homepage:            https://github.com/tensorflow/haskell#readme
@@ -24,7 +24,7 @@ library
                 , filepath
                 , hostname
                 , lens-family
-                , proto-lens == 0.4.*
+                , proto-lens >= 0.4.0 && < 0.6.0
                 , resourcet
                 , stm
                 , stm-chans
