@@ -39,6 +39,7 @@ import           Data.List              (zipWith4)
 import           Data.Maybe             (fromMaybe)
 
 
+import qualified TensorFlow.Build       as TF (Build, explicitName)
 import qualified TensorFlow.Core        as TF
 import qualified TensorFlow.GenOps.Core as TFO (applyAdam, assignAdd, shape)
 import qualified TensorFlow.Gradient    as TF
@@ -46,7 +47,9 @@ import qualified TensorFlow.Ops         as TF hiding (assign, initializedVariabl
 import qualified TensorFlow.Ops         as TFO (assign, initializedVariable,
                                                 initializedVariable', scalar,
                                                 zeroInitializedVariable, zeros)
-import qualified TensorFlow.Tensor      as TF (renderValue)
+import qualified TensorFlow.Output      as TF (OpDef (..))
+import qualified TensorFlow.Tensor      as TF (Tensor (..), TensorKind, renderValue,
+                                               toBuild)
 import qualified TensorFlow.Variable    as TF
 
 -- | Functions that minimize a loss w.r.t. a set of 'TF.Variable's.
@@ -61,7 +64,7 @@ type Minimizer a =
 
 type MinimizerRefs a =
     forall m. TF.MonadBuild m =>
-    [TF.Tensor TF.Ref a] -> [TF.Shape] -> [TF.Tensor TF.Value a] -> m (TF.ControlNode, [TF.Tensor TF.Ref a])
+    [TF.Tensor TF.Ref a] -> [TF.Shape] -> [TF.Tensor TF.Value a] -> m (TF.ControlNode, [TF.Tensor TF.Ref a], [TF.Tensor TF.Ref a])
 
 
 -- | Convenience wrapper around 'TF.gradients' and a 'Minimizer'.
@@ -80,7 +83,7 @@ minimizeWithRefs :: (TF.MonadBuild m, TF.GradientCompatible a)
              -> TF.Tensor v a        -- ^ Loss.
              -> [TF.Tensor TF.Ref a] -- ^ Parameters of the loss function.
              -> [TF.Shape]           -- ^ Parameters shapes of the loss function.
-             -> m (TF.ControlNode, [TF.Tensor TF.Ref a])
+             -> m (TF.ControlNode, [TF.Tensor TF.Ref a], [TF.Tensor TF.Ref a])
 minimizeWithRefs minimizer loss params shapes = do
     let vals = map TF.value params
     TF.gradients loss vals >>= minimizer params shapes
@@ -99,11 +102,12 @@ gradientDescent learningRate params grads = TF.withNameScope "gradientDescent" $
 gradientDescentRefs :: TF.GradientCompatible a
                 => a  -- ^ Learning rate.
                 -> MinimizerRefs a
-gradientDescentRefs learningRate params _ grads = TF.withNameScope "gradientDescent" $ do
-    let applyGrad param grad =
-            TFO.assignAdd param (TF.scalar (-learningRate) `TF.mul` grad)
+gradientDescentRefs learningRate params _ grads =
+  TF.withNameScope "gradientDescent" $ do
+    lrRef <- TFO.initializedVariable' (\x -> x {TF._opName = TF.explicitName "learningRate"}) (TF.scalar learningRate)
+    let applyGrad param grad = TFO.assignAdd param (TF.neg lrRef `TF.mul` grad)
     gr <- TF.group =<< zipWithM applyGrad params grads
-    return (gr, [])
+    return (gr, [], [lrRef])
 
 -- TODO: Support more than Float in adam.
 
@@ -158,30 +162,36 @@ adam' config params grads = TF.withNameScope "adam" $ do
     updateBeta2 <- updateBeta beta2Power beta2
     TF.group (updateBeta1:updateBeta2:updateVars)
 
+toBuildTensor :: TF.TensorKind v => TF.Tensor v a -> TF.Tensor TF.Build a
+toBuildTensor (TF.Tensor o) = TF.Tensor $ TF.toBuild o
 
 adamRefs' :: AdamConfig -> MinimizerRefs Float
-adamRefs' config params shapes grads = TF.withNameScope "adamRefs" $ do
-    let lr = TF.scalar (adamLearningRate config)
-        beta1 = TF.scalar (adamBeta1 config)
-        beta2 = TF.scalar (adamBeta2 config)
-        epsilon = TF.scalar (adamEpsilon config)
+adamRefs' config params shapes grads =
+  TF.withNameScope "adamRefs" $ do
+    lrRef <- TFO.initializedVariable' (\x -> x {TF._opName = TF.explicitName "learningRate"}) (TF.scalar $ adamLearningRate config)
+    beta1Ref <- TFO.initializedVariable' (\x -> x {TF._opName = TF.explicitName "beta1"}) (TF.scalar $ adamBeta1 config)
+    beta2Ref <- TFO.initializedVariable' (\x -> x {TF._opName = TF.explicitName "beta2"}) (TF.scalar $ adamBeta2 config)
+    epsilonRef <- TFO.initializedVariable' (\x -> x { TF._opName = TF.explicitName "epsilon"}) (TF.scalar $ adamEpsilon config)
+    let lr = toBuildTensor lrRef
+        beta1 = toBuildTensor beta1Ref
+        beta2 = toBuildTensor beta2Ref
+        epsilon = toBuildTensor epsilonRef
+    -- let lr = TF.scalar (adamLearningRate config)
+    --     beta1 = TF.scalar (adamBeta1 config)
+    --     beta2 = TF.scalar (adamBeta2 config)
+    --     epsilon = TF.scalar (adamEpsilon config)
     -- Create adam state variables.
     ms <- mapM TFO.zeroInitializedVariable shapes
     vs <- mapM TFO.zeroInitializedVariable shapes
     beta1Power <- TFO.initializedVariable beta1
     beta2Power <- TFO.initializedVariable beta2
     -- Perform adam update.
-    let applyGrad param m v =
-            TFO.applyAdam param m v beta1Power beta2Power
-                                 lr beta1 beta2 epsilon
+    let applyGrad param m v = TFO.applyAdam param m v beta1Power beta2Power lr beta1 beta2 epsilon
     updateVars <- sequence $ zipWith4 applyGrad params ms vs grads
     -- Update beta variables after adam update.
-    let updateBeta betaPower beta =
-            TF.withControlDependencies updateVars
-                (TFO.assign betaPower (betaPower `TF.mul` beta))
+    let updateBeta betaPower beta = TF.withControlDependencies updateVars (TFO.assign betaPower (betaPower `TF.mul` beta))
     updateBeta1 <- updateBeta beta1Power beta1
     updateBeta2 <- updateBeta beta2Power beta2
-    grp <- TF.group (updateBeta1:updateBeta2:updateVars)
+    grp <- TF.group (updateBeta1 : updateBeta2 : updateVars)
     let vars = [beta1Power, beta2Power, updateBeta1, updateBeta2] ++ updateVars
-    return (grp, vars)
-
+    return (grp, vars, [lrRef, beta1Ref, beta2Ref, epsilonRef])
