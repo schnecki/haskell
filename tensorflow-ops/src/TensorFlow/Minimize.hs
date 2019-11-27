@@ -169,17 +169,10 @@ adamRefs' :: AdamConfig -> MinimizerRefs Float
 adamRefs' config params shapes grads =
   TF.withNameScope "adamRefs" $ do
     lrRef <- TFO.initializedVariable' (\x -> x {TF._opName = TF.explicitName "learningRate"}) (TF.scalar $ adamLearningRate config)
-    beta1Ref <- TFO.initializedVariable' (\x -> x {TF._opName = TF.explicitName "beta1"}) (TF.scalar $ adamBeta1 config)
-    beta2Ref <- TFO.initializedVariable' (\x -> x {TF._opName = TF.explicitName "beta2"}) (TF.scalar $ adamBeta2 config)
-    epsilonRef <- TFO.initializedVariable' (\x -> x { TF._opName = TF.explicitName "epsilon"}) (TF.scalar $ adamEpsilon config)
     let lr = toBuildTensor lrRef
-        beta1 = toBuildTensor beta1Ref
-        beta2 = toBuildTensor beta2Ref
-        epsilon = toBuildTensor epsilonRef
-    -- let lr = TF.scalar (adamLearningRate config)
-    --     beta1 = TF.scalar (adamBeta1 config)
-    --     beta2 = TF.scalar (adamBeta2 config)
-    --     epsilon = TF.scalar (adamEpsilon config)
+    let beta1 = TF.scalar (adamBeta1 config)
+        beta2 = TF.scalar (adamBeta2 config)
+        epsilon = TF.scalar (adamEpsilon config)
     -- Create adam state variables.
     ms <- mapM TFO.zeroInitializedVariable shapes
     vs <- mapM TFO.zeroInitializedVariable shapes
@@ -194,4 +187,4 @@ adamRefs' config params shapes grads =
     updateBeta2 <- updateBeta beta2Power beta2
     grp <- TF.group (updateBeta1 : updateBeta2 : updateVars)
     let vars = [beta1Power, beta2Power, updateBeta1, updateBeta2] ++ updateVars
-    return (grp, vars, [lrRef, beta1Ref, beta2Ref, epsilonRef])
+    return (grp, vars, [lrRef])
