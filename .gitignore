@@ -3,3 +3,4 @@
 tensorflow-mnist-input-data/data/*.gz
 *TAGS
 .DS_Store
+stack.yaml.lock
