@@ -32,16 +32,18 @@ module TensorFlow.Minimize
     , adamRefs'
     ) where
 
-import           Control.Monad          (zipWithM)
+import           Control.Monad          (void, zipWithM)
 import           Data.Default           (Default (..))
 import           Data.Int               (Int64)
-import           Data.List              (zipWith4)
+import           Data.List              (zipWith4, zipWith5)
 import           Data.Maybe             (fromMaybe)
 
 
 import qualified TensorFlow.Build       as TF (Build, explicitName)
 import qualified TensorFlow.Core        as TF
-import qualified TensorFlow.GenOps.Core as TFO (applyAdam, assignAdd, shape)
+import qualified TensorFlow.GenOps.Core as TFO (applyAdam, applyRMSProp, assignAdd,
+                                                resourceApplyAdam, resourceApplyRMSProp,
+                                                shape)
 import qualified TensorFlow.Gradient    as TF
 import qualified TensorFlow.Ops         as TF hiding (assign, initializedVariable)
 import qualified TensorFlow.Ops         as TFO (assign, initializedVariable,
@@ -112,15 +114,26 @@ gradientDescentRefs learningRate params _ grads =
 -- TODO: Support more than Float in adam.
 
 data AdamConfig = AdamConfig
-    { adamLearningRate :: Float
-    , adamBeta1        :: Float
-    , adamBeta2        :: Float
-    , adamEpsilon      :: Float
+    { adamLearningRate :: Float -- ^ Learning rate [Default: 0.001]
+    , adamBeta1        :: Float -- ^ Beta 1 [Default: 0.9]
+    , adamBeta2        :: Float -- ^ Beta 2 [Default 0.999]
+    , adamEpsilon      :: Float -- ^ Epsilon [Default: 1e-8]
     }
+
+data RMSPropConfig = RMSPropConfig
+    { rmsPropLearningRate :: Float -- ^ Learning rate [Default: 0.001]
+    , rmsPropRho          :: Float -- ^ Decay rate [Default: 0.9]
+    , rmsPropMomentum     :: Float -- ^ Momentum [Default 0.0]
+    , rmsPropEpsilon      :: Float -- ^ Ridge Term [Default: 1e-7]
+    }
+
 
 instance Default AdamConfig where
   -- Recommended defaults from the adam paper.
   def = AdamConfig 0.001 0.9 0.999 1e-8
+
+instance Default RMSPropConfig where
+  def = RMSPropConfig 0.001 0.9 0.0 1e-7
 
 -- | Perform one step of the adam algorithm.
 --
@@ -133,34 +146,32 @@ adam = adam' def
 adamRefs :: MinimizerRefs Float
 adamRefs = adamRefs' def
 
+rmsPropRefs :: MinimizerRefs Float
+rmsPropRefs = rmsPropRefs' def
+
 
 adam' :: AdamConfig -> Minimizer Float
-adam' config params grads = TF.withNameScope "adam" $ do
+adam' config params grads =
+  TF.withNameScope "adam" $ do
     let lr = TF.scalar (adamLearningRate config)
         beta1 = TF.scalar (adamBeta1 config)
         beta2 = TF.scalar (adamBeta2 config)
         epsilon = TF.scalar (adamEpsilon config)
     -- Create adam state variables.
-    let errorMsg = "TensorFlow.Minimize.adam requires an initial value for all variables"
+    let errorMsg = "TensorFlow.Minimize.adam requires an initial value for all tensors/variables"
         initVal = fromMaybe (error errorMsg) . TF.initializedValue
     ms <- mapM (TF.initializedVariable . TF.zerosLike . initVal) params
     vs <- mapM (TF.initializedVariable . TF.zerosLike . initVal) params
     beta1Power <- TF.initializedVariable beta1
     beta2Power <- TF.initializedVariable beta2
     -- Perform adam update.
-    let applyGrad param m v =
-            TF.resourceApplyAdam param m v
-                                 (TF.readValue beta1Power)
-                                 (TF.readValue beta2Power)
-                                 lr beta1 beta2 epsilon
+    let applyGrad param m v = TF.resourceApplyAdam param m v (TF.readValue beta1Power) (TF.readValue beta2Power) lr beta1 beta2 epsilon
     updateVars <- sequence $ zipWith4 applyGrad params ms vs grads
     -- Update beta variables after adam update.
-    let updateBeta betaPower beta =
-            TF.withControlDependencies updateVars
-                (TF.assign betaPower (TF.readValue betaPower `TF.mul` beta))
+    let updateBeta betaPower beta = TF.withControlDependencies updateVars (TF.assign betaPower (TF.readValue betaPower `TF.mul` beta))
     updateBeta1 <- updateBeta beta1Power beta1
     updateBeta2 <- updateBeta beta2Power beta2
-    TF.group (updateBeta1:updateBeta2:updateVars)
+    TF.group (updateBeta1 : updateBeta2 : updateVars)
 
 toBuildTensor :: TF.TensorKind v => TF.Tensor v a -> TF.Tensor TF.Build a
 toBuildTensor (TF.Tensor o) = TF.Tensor $ TF.toBuild o
@@ -180,6 +191,8 @@ adamRefs' config params shapes grads =
     beta2Power <- TFO.initializedVariable beta2
     -- Perform adam update.
     let applyGrad param m v = TFO.applyAdam param m v beta1Power beta2Power lr beta1 beta2 epsilon
+    -- let applyGrad param m v = TF.resourceApplyAdam param m v (TF.readValue beta1Power) (TF.readValue beta2Power) lr beta1 beta2 epsilon
+
     updateVars <- sequence $ zipWith4 applyGrad params ms vs grads
     -- Update beta variables after adam update.
     let updateBeta betaPower beta = TF.withControlDependencies updateVars (TFO.assign betaPower (betaPower `TF.mul` beta))
@@ -187,4 +200,28 @@ adamRefs' config params shapes grads =
     updateBeta2 <- updateBeta beta2Power beta2
     grp <- TF.group (updateBeta1 : updateBeta2 : updateVars)
     let vars = ms ++ vs ++ [beta1Power, beta2Power]
+    return (grp, vars, [lrRef])
+
+rmsPropRefs' :: RMSPropConfig -> MinimizerRefs Float
+rmsPropRefs' config params shapes grads =
+  TF.withNameScope "rmsPropRefs" $ do
+    lrRef <- TFO.initializedVariable' (\x -> x {TF._opName = TF.explicitName "learningRate"}) (TF.scalar $ rmsPropLearningRate config)
+    let lr = toBuildTensor lrRef
+    let rho = TF.scalar (rmsPropRho config)
+        momentum = TF.scalar (rmsPropMomentum config)
+        epsilon = TF.scalar (rmsPropEpsilon config)
+    -- Create rmsProp state variables.
+    vs <- mapM TFO.zeroInitializedVariable shapes
+    ms <- mapM TFO.zeroInitializedVariable shapes
+    moms <- mapM TFO.zeroInitializedVariable shapes
+    -- -- Perform rmsProp update.
+    let applyGrad param v m mom = TFO.applyRMSProp v m mom lr rho momentum epsilon
+    void $ sequence $ zipWith5 applyGrad params vs ms moms grads
+    -- Update beta variables after rmsProp update.
+    -- let updateBeta betaPower beta = TF.withControlDependencies updateVars (TFO.assign betaPower (betaPower `TF.mul` beta))
+    -- updateBeta1 <- updateBeta beta1Power beta1
+    -- updateBeta2 <- updateBeta beta2Power beta2
+    -- grp <- TF.group updateVars
+    grp <- TF.noOp
+    let vars = ms ++ vs  ++ moms -- ++ [beta1Power, beta2Power]
     return (grp, vars, [lrRef])
